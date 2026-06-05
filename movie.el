@@ -1405,7 +1405,7 @@ If INCLUDE-DIRECTORIES, also include directories that have matching names."
     (call-process "youtube-dl" nil (list (current-buffer) nil) nil
 		  "-F" url)
     (goto-char (point-min))
-    (re-search-forward "^format")
+    (re-search-forward "^---")
     (forward-line 1)
     (delete-region (point-min) (point))
     (while (re-search-forward "audio only\\|video only" nil t)
