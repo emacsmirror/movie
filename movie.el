@@ -37,6 +37,7 @@
 (require 'touchgrid)
 (require 'url-cache)
 (require 'vtable)
+(require 'svg-aux)
 
 (defvar movie-order nil)
 (defvar movie-limit nil)
@@ -2460,7 +2461,6 @@ output directories whose names match REGEXP."
 		 ,(or time 5000)]))))
 
 (defun movie--overlay-card (file width height)
-  (message "Overlaying %s" file)
   (movie-send-mpv-command
    `((command . ["overlay-add"
 		 0 0 0 ,file 0 "bgra"
@@ -2491,8 +2491,8 @@ output directories whose names match REGEXP."
 			(directory-files movie-recording-directory t)
 			old-files)))
 	      (if new
-		  (let ((names (movie-query-actor movie (car new) is-movie)))
-		    (movie--create-actor-card names))
+		  (let ((data (movie-query-actor movie (car new) is-movie)))
+		    (movie--create-actor-card data))
 		(setq movie--actor-timer (run-at-time 0.1 nil func))))))
     (movie-send-mpv-command
      `((command . ["screenshot" "video"])))
@@ -2554,18 +2554,10 @@ output directories whose names match REGEXP."
 		 (list "image_url"
 		       (concat "data:image/jpg;base64," data)))))))))))
 
-
-(defun movie--test-screenshot (image)
-  (movie--create-actor-card
-   (movie-query-actor
-    (file-name-nondirectory (directory-file-name (file-name-directory image)))
-    image t)
-   image))
-
-(defun movie--create-actor-card (data &optional screenshot)
+(defun movie--create-actor-card (data)
   (let ((elems (split-string data ";" nil split-string-default-separators)))
     (if (= (length elems) 4)
-	(movie--create-actor-card-1 elems screenshot)
+	(apply #'movie--create-actor-card-1 elems)
       ;; Didn't recognize anything.
       (movie--mpv-osd data))))
 
@@ -2578,115 +2570,67 @@ output directories whose names match REGEXP."
 		  (string-to-number (match-string 1)))
 	   (string-to-number (match-string 1))))))
 
-(defun movie--create-actor-card-1 (elems &optional screenshot)
+(defun movie--create-actor-card-1 (pid character name known-for)
+  ;; First display the name.
+  (movie--display-overlay nil character name known-for)
+  ;; Sometimes Gemini returns the person id without the "nm".
+  (unless (string-match-p "\\`nm" pid)
+    (setq pid (concat "nm" pid)))
+  (require 'imdb-mode)
+  (imdb-initialize)
+  ;; Then get the actor image and display that, too.
+  ;; Disabled for now -- it's become very difficult to scrape imdb.com.
+  (when nil
+    (imdb-fetch-profile-picture
+     (imdb-mode-person-id name)
+     (lambda (image)
+       (movie--display-overlay image character name known-for)))))
+
+(defun movie--display-overlay (image character name known-for)
   (let* ((width (movie--display-size "width"))
 	 (height (movie--display-size "height"))
 	 (screen-width (display-pixel-width))
 	 (svg (svg-create width height))
 	 (font-size (* 120 (/ (float width) screen-width)))
 	 (text-start (- height (* 2 font-size)))
-	 (pid (car elems))
 	 filter)
-    ;; Sometimes Gemini returns the person id without the "nm".
-    (unless (string-match-p "\\`nm" pid)
-      (setq pid (concat "nm" pid)))
     ;; Create an outline around the text.
     (setq filter (svg-outline svg 3 "black" 1))
-    (require 'imdb-mode)
-    (imdb-initialize)
-    (imdb-fetch-profile-picture
-     (imdb-mode-person-id (nth 2 elems))
-     (lambda (image)
-       ;; This is for debugging only.
-       (when screenshot
-	 (let* ((ssize (image-size (create-image screenshot nil nil
-						 :scaling 1)
-				   t))
-		(saspect (/ (float (car ssize)) (cdr ssize)))
-		(daspect (/ (float width) height)))
-	   (if (> saspect daspect)
-	       (let ((sheight (* (/ width (float (car ssize))) (cdr ssize))))
-		 (svg-embed svg screenshot "image/jpeg" nil
-			    :width width
-			    :height sheight
-			    :x 0
-			    :y (/ (- height sheight) 2)))
-	     (let ((swidth (* (/ height (float (cdr ssize))) (car ssize))))
-	       (svg-embed svg screenshot "image/jpeg" nil
-			  :width swidth
-			  :height height
-			  :x (/ (- width swidth) 2)
-			  :y 0)))))
-       (when image
-	 (let* ((size (image-size (create-image image nil t :scaling 1) t))
-		(im-width (* (/ (/ height 2) (float (cdr size)))
-			     (car size))))
-	   (svg-embed svg image "image/jpeg" t
-		      :x (- width 30 im-width)
-		      :y 30
-		      :height (/ height 2)
-		      :width im-width)))
-       (cl-loop for (text color) in
-		(list (list (format "%s (%s)" (nth 2 elems) (nth 1 elems))
-			    "white")
-		      (list (nth 3 elems) "grey"))
-		do (svg-text svg (format "%s" text)
-			     :font-size font-size
-			     :stroke "black"
-			     :fill color
-			     :stroke-width 0
-			     :font-weight "bold"
-			     :font-family "Futura"
-			     :y text-start
-			     :x 30
-			     :filter filter)
-		(cl-incf text-start (* font-size 1.3)))
-       (with-temp-buffer
-	 (svg-print svg)
-	 ;; Apparently it SVG conversion doesn't work as well unless
-	 ;; you write to a file first, so don't use `call-process-region'.
-	 (write-region (point-min) (point-max) "/tmp/mpv.svg")
-	 (call-process "rsvg-convert" nil nil nil
-		       "--output=/tmp/mpv.png" "/tmp/mpv.svg")
-	 (call-process "convert" nil nil nil
-		       "-background" "transparent"
-		       "-depth" "8" 
-		       "/tmp/mpv.png" "bgra:/tmp/mpv.bgra")
-	 (when screenshot
-	   (call-process "convert" nil nil nil
-			 "-background" "transparent"
-			 "/tmp/mpv.png" "/tmp/mpv.jpg")))
-       (movie--overlay-card "/tmp/mpv.bgra" width height)))))
-
-(defun movie--test ()
-  (let* ((width 1469)
-	 (height 1064)
-	 (svg (svg-create width height))
-	 (text "Beat the Devil")
-	 filter)
-    ;; Create an outline around the text.
-    (setq filter (svg-outline svg 10 "black" 0.5))
-    (svg-embed svg "/tmp/a.jpg" "image/jpeg" nil
-	       :width width
-	       :height height
-	       :x 0
-	       :y 0)
-    (svg-text svg text
-	      :font-size 120
-	      :stroke "black"
-	      :fill "white"
-	      :stroke-width 0
-	      :font-weight "bold"
-	      :font-family "Futura"
-	      :y 200
-	      :x 30
-	      :filter filter)
+    (when image
+      (let* ((size (image-size (create-image image nil t :scaling 1) t))
+	     (im-width (* (/ (/ height 2) (float (cdr size)))
+			  (car size))))
+	(svg-embed svg image "image/jpeg" t
+		   :x (- width 30 im-width)
+		   :y 30
+		   :height (/ height 2)
+		   :width im-width)))
+    (cl-loop for (text color) in
+	     (list (list (format "%s (%s)" name character) "white")
+		   (list known-for "grey"))
+	     do (svg-text svg (format "%s" text)
+			  :font-size font-size
+			  :stroke "black"
+			  :fill color
+			  :stroke-width 0
+			  :font-weight "bold"
+			  :font-family "Futura"
+			  :y text-start
+			  :x 30
+			  :filter filter)
+	     (cl-incf text-start (* font-size 1.3)))
     (with-temp-buffer
       (svg-print svg)
+      ;; Apparently it SVG conversion doesn't work as well unless
+      ;; you write to a file first, so don't use `call-process-region'.
       (write-region (point-min) (point-max) "/tmp/mpv.svg")
-      (call-process "/usr/private/bin/convert" nil nil nil
+      (call-process "rsvg-convert" nil nil nil
+		    "--output=/tmp/mpv.png" "/tmp/mpv.svg")
+      (call-process "convert" nil nil nil
 		    "-background" "transparent"
-		    "/tmp/mpv.svg" "/tmp/test.jpg"))))
+		    "-depth" "8" 
+		    "/tmp/mpv.png" "bgra:/tmp/mpv.bgra"))
+    (movie--overlay-card "/tmp/mpv.bgra" width height)))
 
 (provide 'movie)
 
